@@ -88,7 +88,6 @@ export const useGlobalAPI = ({ config, setConfig, messageMap, headId }: GlobalAP
                 if (!targetPath) return { success: false, message: "Path required" };
                 const cleanTarget = normalizePath(targetPath);
                 
-                // Read from memory (which is synced with disk on load/write)
                 const file = stateRef.current.config.files.find(f => {
                     const currentPath = f.path || f.name;
                     const cleanF = normalizePath(currentPath);
@@ -104,7 +103,6 @@ export const useGlobalAPI = ({ config, setConfig, messageMap, headId }: GlobalAP
                 const cleanPath = normalizePath(targetPath);
                 const fileName = cleanPath.split('/').pop() || cleanPath;
 
-                // 1. Local Disk Write Interception
                 const fileStore = useFileStore.getState();
                 if (fileStore.isLocalMode && fileStore.projectHandle) {
                     try {
@@ -114,7 +112,6 @@ export const useGlobalAPI = ({ config, setConfig, messageMap, headId }: GlobalAP
                         await writable.write(content);
                         await writable.close();
 
-                        // Register handle if new
                         if (!fileStore.fileHandles.has(cleanPath)) {
                             fileStore.registerHandle(cleanPath, fileHandle);
                         }
@@ -124,7 +121,6 @@ export const useGlobalAPI = ({ config, setConfig, messageMap, headId }: GlobalAP
                     }
                 }
 
-                // 2. Memory State Update (UI Refresh)
                 let action = 'created';
                 setConfig(prev => {
                     const newFiles = [...prev.files];
@@ -157,7 +153,6 @@ export const useGlobalAPI = ({ config, setConfig, messageMap, headId }: GlobalAP
             deleteFile: async (targetPath: string) => {
                 const cleanPath = normalizePath(targetPath);
 
-                // 1. Check existence in memory
                 const exists = stateRef.current.config.files.some(
                     f => normalizePath(f.path || f.name) === cleanPath
                 );
@@ -165,7 +160,6 @@ export const useGlobalAPI = ({ config, setConfig, messageMap, headId }: GlobalAP
                     return { success: false, message: `File '${cleanPath}' not found` };
                 }
 
-                // 2. Local Disk Delete Interception
                 const fileStore = useFileStore.getState();
                 if (fileStore.isLocalMode && fileStore.projectHandle) {
                     try {
@@ -179,7 +173,6 @@ export const useGlobalAPI = ({ config, setConfig, messageMap, headId }: GlobalAP
                     }
                 }
 
-                // 3. Memory State Update
                 setConfig(prev => {
                     const remaining = prev.files.filter(f => normalizePath(f.path || f.name) !== cleanPath);
                     return { ...prev, files: remaining };
@@ -188,6 +181,61 @@ export const useGlobalAPI = ({ config, setConfig, messageMap, headId }: GlobalAP
                 return { success: true, message: `File '${cleanPath}' deleted` };
             },
 
+            // [新增] 重命名同步接口 (AI 端操作)
+            renameFile: async (targetPath: string, newPath: string) => {
+                if (!targetPath || !newPath) return { success: false, message: "Paths required" };
+                const cleanPath = normalizePath(targetPath);
+                const cleanNewPath = normalizePath(newPath);
+
+                const exists = stateRef.current.config.files.some(
+                    f => normalizePath(f.path || f.name) === cleanPath
+                );
+                if (!exists) {
+                    return { success: false, message: `File '${cleanPath}' not found` };
+                }
+
+                const fileStore = useFileStore.getState();
+                if (fileStore.isLocalMode && fileStore.projectHandle) {
+                    try {
+                        const oldDirHandle = await getDirectoryHandleByPath(fileStore.projectHandle, cleanPath, false);
+                        const oldFileName = cleanPath.split('/').pop()!;
+                        const fileHandle = await oldDirHandle.getFileHandle(oldFileName);
+                        const diskFile = await fileHandle.getFile();
+                        const content = await diskFile.text();
+
+                        const newDirHandle = await getDirectoryHandleByPath(fileStore.projectHandle, cleanNewPath, true);
+                        const newFileName = cleanNewPath.split('/').pop()!;
+                        const newFileHandle = await newDirHandle.getFileHandle(newFileName, { create: true });
+                        const writable = await newFileHandle.createWritable();
+                        await writable.write(content);
+                        await writable.close();
+
+                        await oldDirHandle.removeEntry(oldFileName);
+                        fileStore.unregisterHandle(cleanPath);
+                        fileStore.registerHandle(cleanNewPath, newFileHandle);
+                    } catch (e: any) {
+                         console.error("Local disk rename failed", e);
+                         return { success: false, message: `Local Disk Rename Failed: ${e.message}` };
+                    }
+                }
+
+                const newName = cleanNewPath.split('/').pop() || cleanNewPath;
+                setConfig(prev => {
+                    const newFiles = [...prev.files];
+                    const fileIndex = newFiles.findIndex(f => normalizePath(f.path || f.name) === cleanPath);
+                    if (fileIndex !== -1) {
+                        newFiles[fileIndex] = {
+                            ...newFiles[fileIndex],
+                            path: cleanNewPath,
+                            name: newName,
+                            lastModified: Date.now()
+                        };
+                    }
+                    return { ...prev, files: newFiles };
+                });
+
+                return { success: true, message: `File renamed to '${cleanNewPath}'` };
+            },
 
             // --- Tools ---
             getTools: () => {

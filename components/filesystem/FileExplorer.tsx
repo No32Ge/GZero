@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Icons } from '../Icon';
 import { VirtualFile } from '../../types';
 import { buildFileTree, FileNode, normalizePath } from '../../utils/fileSystem';
@@ -9,6 +9,7 @@ interface FileExplorerProps {
     onSelectFile: (file: VirtualFile) => void;
     onCreateFile: (path: string) => void;
     onDeleteFile?: (id: string) => void;
+    onRenameFile?: (id: string, newPath: string) => void; // [新增]
     onToggleContext?: (id: string) => void;
 }
 
@@ -17,15 +18,23 @@ const FileTreeNode: React.FC<{
     level: number;
     onSelect: (path: string) => void;
     onDelete?: (id: string) => void;
+    onRename?: (id: string, newPath: string) => void; // [新增]
     onToggleContext?: (id: string) => void;
     filesMap: Record<string, VirtualFile>;
     pendingDeleteId: string | null;
     setPendingDeleteId: React.Dispatch<React.SetStateAction<string | null>>;
-    // [新增] 传递 Store 状态
     currentEntryPoint: string | null;
     onSetEntryPoint: (path: string) => void;
-}> = ({ node, level, onSelect, onDelete, onToggleContext, filesMap, pendingDeleteId, setPendingDeleteId, currentEntryPoint, onSetEntryPoint }) => {
+}> = ({ node, level, onSelect, onDelete, onRename, onToggleContext, filesMap, pendingDeleteId, setPendingDeleteId, currentEntryPoint, onSetEntryPoint }) => {
     const [isOpen, setIsOpen] = useState(true);
+    
+    // [新增] 重命名状态管理
+    const [isRenaming, setIsRenaming] = useState(false);
+    const [renameValue, setRenameValue] = useState(node.path);
+
+    useEffect(() => {
+        setRenameValue(node.path);
+    }, [node.path]);
 
     // 渲染文件节点
     if (node.type === 'file') {
@@ -33,11 +42,7 @@ const FileTreeNode: React.FC<{
         const file = filesMap[node.id];
         const isInContext = file?.inContext !== false;
         
-        // 判断是否是当前选中的入口文件
-        // Store 里存的是 "src/main.tsx" (clean path)，node.path 也是 clean path
         const isEntryPoint = currentEntryPoint === node.path;
-        
-        // 判断是否是可执行文件 (JS/TS)
         const isRunnable = /\.(tsx|ts|jsx|js)$/.test(node.name);
 
         return (
@@ -45,27 +50,56 @@ const FileTreeNode: React.FC<{
                 className={`group flex items-center transition-all relative pr-2 duration-200 ${isPendingDelete ? 'bg-red-900/40' : (isEntryPoint ? 'bg-green-900/20' : 'hover:bg-[#2a2a2d]')}`}
                 style={{ paddingLeft: `${level * 12 + 12}px` }}
             >
-                {/* 1. 左侧：选择区域 */}
+                {/* 1. 左侧：选择区域与输入框 */}
                 <div
                     className="flex-1 flex items-center gap-2 py-1.5 cursor-pointer min-w-0"
                     onClick={(e) => {
                         e.preventDefault();
-                        onSelect(node.path);
+                        if (!isRenaming) onSelect(node.path);
                     }}
                     title={node.path}
                 >
                     <span className={`shrink-0 transition-colors ${isPendingDelete ? 'text-red-400' : (isEntryPoint ? 'text-green-400' : (isInContext ? 'text-blue-400' : 'text-slate-600'))}`}>
                         {isEntryPoint ? <Icons.Play /> : <Icons.File />}
                     </span>
-                    <span className={`text-xs font-mono truncate select-none ${isPendingDelete ? 'text-red-200' : (isEntryPoint ? 'text-green-300 font-bold' : (isInContext ? 'text-slate-300' : 'text-slate-500 line-through decoration-slate-700'))}`}>
-                        {node.name}
-                    </span>
+                    
+                    {isRenaming ? (
+                        <input
+                            autoFocus
+                            value={renameValue}
+                            onChange={e => setRenameValue(e.target.value)}
+                            onBlur={() => {
+                                setIsRenaming(false);
+                                if (renameValue !== node.path && renameValue.trim() !== '') {
+                                    onRename?.(node.id, renameValue);
+                                }
+                            }}
+                            onKeyDown={e => {
+                                if (e.key === 'Enter') {
+                                    setIsRenaming(false);
+                                    if (renameValue !== node.path && renameValue.trim() !== '') {
+                                        onRename?.(node.id, renameValue);
+                                    }
+                                } else if (e.key === 'Escape') {
+                                    setIsRenaming(false);
+                                    setRenameValue(node.path);
+                                }
+                            }}
+                            className="text-xs bg-slate-900 text-white outline-none border border-blue-500 px-1 py-0.5 rounded w-full ml-1"
+                            onClick={e => e.stopPropagation()}
+                        />
+                    ) : (
+                        <span className={`text-xs font-mono truncate select-none ${isPendingDelete ? 'text-red-200' : (isEntryPoint ? 'text-green-300 font-bold' : (isInContext ? 'text-slate-300' : 'text-slate-500 line-through decoration-slate-700'))}`}>
+                            {node.name}
+                        </span>
+                    )}
+
                     {isPendingDelete && <span className="text-[9px] text-red-400 uppercase font-bold tracking-wider ml-2">Confirm?</span>}
-                    {isEntryPoint && <span className="text-[8px] bg-green-900 text-green-400 px-1 rounded ml-2 uppercase">Entry</span>}
+                    {isEntryPoint && !isRenaming && <span className="text-[8px] bg-green-900 text-green-400 px-1 rounded ml-2 uppercase">Entry</span>}
                 </div>
 
-                {/* 2. 中间：设为入口 (仅针对 JS/TS 文件) */}
-                {isRunnable && !isEntryPoint && !isPendingDelete && (
+                {/* 2. 中间：设为入口 */}
+                {isRunnable && !isEntryPoint && !isPendingDelete && !isRenaming && (
                      <button
                         onClick={(e) => {
                             e.stopPropagation();
@@ -78,8 +112,8 @@ const FileTreeNode: React.FC<{
                     </button>
                 )}
 
-                {/* 3. 中间：上下文切换开关 */}
-                {onToggleContext && !isPendingDelete && (
+                {/* 3. 中间：上下文切换 */}
+                {onToggleContext && !isPendingDelete && !isRenaming && (
                     <button
                         onClick={(e) => {
                             e.stopPropagation();
@@ -94,8 +128,23 @@ const FileTreeNode: React.FC<{
                     </button>
                 )}
 
-                {/* 4. 右侧：删除按钮 */}
-                {onDelete && (
+                {/* [新增] 4. 右侧：重命名按钮 */}
+                {onRename && !isPendingDelete && !isRenaming && (
+                    <button
+                        onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setIsRenaming(true);
+                        }}
+                        className={`p-1.5 mr-1 rounded transition-all shrink-0 z-20 opacity-0 group-hover:opacity-100 text-slate-500 hover:text-blue-400 hover:bg-slate-800`}
+                        title="Rename File"
+                    >
+                        <div className="scale-75"><Icons.Edit /></div>
+                    </button>
+                )}
+
+                {/* 5. 右侧：删除按钮 */}
+                {onDelete && !isRenaming && (
                     <button
                         onClick={(e) => {
                             e.preventDefault();
@@ -148,6 +197,7 @@ const FileTreeNode: React.FC<{
                     level={level + 1}
                     onSelect={onSelect}
                     onDelete={onDelete}
+                    onRename={onRename}
                     onToggleContext={onToggleContext}
                     filesMap={filesMap}
                     pendingDeleteId={pendingDeleteId}
@@ -160,7 +210,7 @@ const FileTreeNode: React.FC<{
     );
 };
 
-export const FileExplorer: React.FC<FileExplorerProps> = ({ files, onSelectFile, onCreateFile, onDeleteFile, onToggleContext }) => {
+export const FileExplorer: React.FC<FileExplorerProps> = ({ files, onSelectFile, onCreateFile, onDeleteFile, onRenameFile, onToggleContext }) => {
     const tree = useMemo(() => buildFileTree(files), [files]);
     const filesMap = useMemo(() => {
         return files.reduce((acc, file) => {
@@ -172,8 +222,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ files, onSelectFile,
     const [newPath, setNewPath] = useState('');
     const [isCreating, setIsCreating] = useState(false);
     const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
-    
-    // [新增] 从 Store 获取入口状态
+
     const entryPoint = useFileStore(s => s.entryPoint);
     const setEntryPoint = useFileStore(s => s.setEntryPoint);
 
@@ -220,6 +269,7 @@ export const FileExplorer: React.FC<FileExplorerProps> = ({ files, onSelectFile,
                         node={node}
                         level={0}
                         onDelete={onDeleteFile}
+                        onRename={onRenameFile}
                         onToggleContext={onToggleContext}
                         filesMap={filesMap}
                         pendingDeleteId={pendingDeleteId}

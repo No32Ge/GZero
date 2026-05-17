@@ -8,21 +8,16 @@ import { extractDependencies, transformToSandpackFiles, detectTemplate } from '.
 import { PreviewPanel } from './PreviewPanel';
 import { VirtualFile } from '../../types';
 import { Icons } from '../Icon';
-import { readDirectoryRecursive } from '../../utils/localFileSystem';
+// [修正] 导入 DirectoryHandle 以支持本地双向同步
+import { readDirectoryRecursive, getDirectoryHandleByPath } from '../../utils/localFileSystem';
 // @ts-ignore
 import JSZip from 'jszip';
 
-// ... (Templats definitions are omitted to keep copy paste simple, but they should be kept in real file. Assuming you keep existing TEMPLATES constants here)
-// 为了确保代码可以复制，这里保留 TEMPLATES 定义
-const TEMPLATES: any = { 
-    react: [{ path: 'package.json', content: '{}', language: 'json' }, { path: 'src/App.tsx', content: '', language: 'typescript' }], 
-    vue: [{ path: 'package.json', content: '{}', language: 'json' }], 
-    vanilla: [{ path: 'index.html', content: '', language: 'html' }] 
-}; 
-// NOTE: Please KEEP your original TEMPLATES constant. The above is just a placeholder to make this file compilable if you paste it blindly.
-// If you paste this, make sure the original TEMPLATES content is preserved or restored. 
-// Given the instruction "provide copy paste code", I will include a minimal working version of templates below to avoid breaking build, 
-// BUT YOU SHOULD PREFERABLY KEEP YOUR ORIGINAL TEMPLATES OBJECT.
+const TEMPLATES: any = {
+    react: [{ path: 'package.json', content: '{}', language: 'json' }, { path: 'src/App.tsx', content: '', language: 'typescript' }],
+    vue: [{ path: 'package.json', content: '{}', language: 'json' }],
+    vanilla: [{ path: 'index.html', content: '', language: 'html' }]
+};
 
 export const FileWorkspace: React.FC = () => {
     const { config } = useBrain();
@@ -37,10 +32,11 @@ export const FileWorkspace: React.FC = () => {
     const deleteFile = useFileStore(s => s.deleteFile);
     const toggleFileContext = useFileStore(s => s.toggleFileContext);
     const getFileById = useFileStore(s => s.getFileById);
-    
+
     // Local Mode
     const mountLocalProject = useFileStore(s => s.mountLocalProject);
     const isLocalMode = useFileStore(s => s.isLocalMode);
+    const projectHandle = useFileStore(s => s.projectHandle);
     const fileHandles = useFileStore(s => s.fileHandles);
 
     const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -57,10 +53,8 @@ export const FileWorkspace: React.FC = () => {
     // --- Actions ---
 
     const handleSaveFile = async (id: string, content: string) => {
-        // 1. Update UI / Store State
         updateFileContent(id, content);
         
-        // 2. Persist to Local Disk if in Local Mode
         if (isLocalMode) {
              const file = getFileById(id);
              if (!file) return;
@@ -72,7 +66,6 @@ export const FileWorkspace: React.FC = () => {
                      const writable = await handle.createWritable();
                      await writable.write(content);
                      await writable.close();
-                     // Silent success or subtle indicator
                  } catch (e: any) {
                      console.error("Save to disk failed", e);
                      showNotification("Failed to save to disk: " + e.message, "error");
@@ -83,10 +76,9 @@ export const FileWorkspace: React.FC = () => {
         }
     };
 
-    const handleToggleContext = (id: string) => {
-        toggleFileContext(id);
-    };
+    const handleToggleContext = (id: string) => toggleFileContext(id);
 
+    // [强化] 支持双向同步（创建文件）
     const handleCreateFile = async (inputPath: string) => {
         if (!inputPath) return;
         const cleanPath = normalizePath(inputPath);
@@ -97,15 +89,18 @@ export const FileWorkspace: React.FC = () => {
             return;
         }
 
-        // Local Mode Handling (Requires API call to create file on disk first usually, 
-        // but here we just simulate UI creation. Real creation happens on save or via OS agent)
-        // Ideally, we should create empty file on disk immediately.
-        if (isLocalMode) {
-            // For simplicity in this UI component, we rely on the OS Agent or manual Save to create the file on disk.
-            // Or we could invoke useGlobalAPI.writeFile here if we had access to it.
-            // Since we don't have direct access to `writeFile` from `useGlobalAPI` inside this component easily (unless passed down),
-            // We just create in memory. The user must type something and Save to persist.
-            showNotification("File created in memory. Save to persist to disk.", "success");
+        if (isLocalMode && projectHandle) {
+            try {
+                const newDirHandle = await getDirectoryHandleByPath(projectHandle, cleanPath, true);
+                const newFileHandle = await newDirHandle.getFileHandle(fileName, { create: true });
+                const writable = await newFileHandle.createWritable();
+                await writable.write("");
+                await writable.close();
+                useFileStore.getState().registerHandle(cleanPath, newFileHandle);
+            } catch (e: any) {
+                showNotification("Create failed on disk: " + e.message, "error");
+                return;
+            }
         }
 
         const newFile: VirtualFile = {
@@ -122,27 +117,80 @@ export const FileWorkspace: React.FC = () => {
         setActiveTab('code');
     };
 
-    const handleDeleteFile = (id: string) => {
-        // Note: This only deletes from memory/UI. 
-        // To delete from disk, one should use the OS Agent 'delete_file' command.
-        // Or we implement a direct delete confirmation here. 
-        // For now, keeping it consistent with memory-first approach.
-        if (isLocalMode && !window.confirm("This will only remove from the view. Use the Agent to delete from disk permanently. Continue?")) {
+    // [强化] 支持双向同步（删除文件）
+    const handleDeleteFile = async (id: string) => {
+        if (isLocalMode && !window.confirm("This will permanently delete the file from your local disk. Continue?")) {
             return;
         }
+
+        if (isLocalMode && projectHandle) {
+            const file = getFileById(id);
+            if (file) {
+                const cleanPath = normalizePath(file.path || file.name);
+                try {
+                    const dirHandle = await getDirectoryHandleByPath(projectHandle, cleanPath, false);
+                    const fileName = cleanPath.split('/').pop()!;
+                    await dirHandle.removeEntry(fileName);
+                    useFileStore.getState().unregisterHandle(cleanPath);
+                } catch (e: any) {
+                    showNotification("Delete failed on disk: " + e.message, "error");
+                    return;
+                }
+            }
+        }
+
         deleteFile(id);
         if (activeFileId === id) setActiveFileId(null);
+    };
+
+    // [新增] UI发起的双向同步（重命名文件）
+    const handleRenameFile = async (id: string, newPath: string) => {
+        const file = getFileById(id);
+        if (!file) return;
+        
+        const oldPath = normalizePath(file.path || file.name);
+        const cleanNewPath = normalizePath(newPath);
+        if (oldPath === cleanNewPath) return;
+
+        if (isLocalMode && projectHandle) {
+             try {
+                 const oldDirHandle = await getDirectoryHandleByPath(projectHandle, oldPath, false);
+                 const oldFileName = oldPath.split('/').pop()!;
+                 const fileHandle = await oldDirHandle.getFileHandle(oldFileName);
+                 const diskFile = await fileHandle.getFile();
+                 const content = await diskFile.text();
+
+                 const newDirHandle = await getDirectoryHandleByPath(projectHandle, cleanNewPath, true);
+                 const newFileName = cleanNewPath.split('/').pop()!;
+                 const newFileHandle = await newDirHandle.getFileHandle(newFileName, { create: true });
+                 const writable = await newFileHandle.createWritable();
+                 await writable.write(content);
+                 await writable.close();
+
+                 await oldDirHandle.removeEntry(oldFileName);
+                 
+                 const fileStore = useFileStore.getState();
+                 fileStore.unregisterHandle(oldPath);
+                 fileStore.registerHandle(cleanNewPath, newFileHandle);
+             } catch (e: any) {
+                 showNotification("Rename failed on disk: " + e.message, "error");
+                 return;
+             }
+        }
+
+        useFileStore.getState().updateFile(id, {
+            path: cleanNewPath,
+            name: cleanNewPath.split('/').pop() || cleanNewPath
+        });
     };
 
     // --- Local Project ---
     const handleOpenLocalProject = async () => {
         try {
-            // @ts-ignore - File System Access API
+            // @ts-ignore
             const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-            
             showNotification("Scanning local files...", "success");
             const { files, handles } = await readDirectoryRecursive(dirHandle);
-            
             mountLocalProject(dirHandle, files, handles);
             showNotification(`Mounted: ${dirHandle.name}`, "success");
             setActiveTab('code');
@@ -155,7 +203,6 @@ export const FileWorkspace: React.FC = () => {
     };
 
     // --- Template & Import/Export ---
-    // (Keeping simplified logic to save space, assuming original functions exist or are copied from previous file content)
     const handleInitTemplate = (type: string) => { 
        alert("Templates are reset in local mode context. Switch to memory mode to use templates.");
     };
@@ -194,7 +241,6 @@ export const FileWorkspace: React.FC = () => {
         if (uploadInputRef.current) uploadInputRef.current.value = '';
     };
 
-    // Preview
     const previewData = useMemo(() => {
         if (activeTab !== 'preview') return null;
         return { files: transformToSandpackFiles(files), dependencies: extractDependencies(files), template: detectTemplate(files) };
@@ -213,7 +259,6 @@ export const FileWorkspace: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-2">
-                     {/* Local Project Button */}
                     <button 
                         onClick={handleOpenLocalProject}
                         className={`p-1.5 rounded transition-colors ${isLocalMode ? 'text-green-400 bg-green-900/20 shadow-[0_0_10px_rgba(74,222,128,0.2)]' : 'text-slate-500 hover:text-white hover:bg-slate-800'}`} 
@@ -238,6 +283,7 @@ export const FileWorkspace: React.FC = () => {
                             onSelectFile={(f) => setActiveFileId(f.id)}
                             onCreateFile={handleCreateFile}
                             onDeleteFile={handleDeleteFile}
+                            onRenameFile={handleRenameFile} // [传入重命名处理]
                             onToggleContext={handleToggleContext}
                         />
                     </div>

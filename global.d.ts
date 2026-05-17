@@ -1,5 +1,4 @@
 export {};
-
 declare global {
     interface Window {
         GeBrain: {
@@ -15,9 +14,10 @@ declare global {
             
             // File System (Updated to Promise for Local I/O)
             listFiles: () => any[];
-            readFile: (path: string) => any; // Keep sync for read if possible, or make async if needed. Currently read from store is sync.
-            writeFile: (path: string, content: string) => Promise<any>; // Changed to Promise
-            deleteFile: (path: string) => Promise<any>; // Changed to Promise
+            readFile: (path: string) => any;
+            writeFile: (path: string, content: string) => Promise<any>;
+            deleteFile: (path: string) => Promise<any>;
+            renameFile: (oldPath: string, newPath: string) => Promise<any>; // [新增] 允许重命名文件
             
             // Tools
             getTools: () => any[];

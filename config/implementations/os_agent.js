@@ -1,5 +1,6 @@
+
 // Ge Brain OS Agent v3.1 (Async I/O Support)
-try { 
+try {
     if (!window.GeBrain) return "Error: GeBrain API not found. Please refresh.";
     const cmd = args.command;
 
@@ -17,8 +18,8 @@ try {
     // Helper: Fuzzy Replace
     const fuzzyReplace = (fullText, search, replace) => {
         if (fullText.includes(search)) return fullText.replace(search, replace);
-        const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\\\$&');
-        const searchPattern = search.trim().split(/\\s+/).map(escapeRegExp).join('\\\\s+');
+        const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const searchPattern = search.trim().split(/\s+/).map(escapeRegExp).join('\\s+');
         const regex = new RegExp(searchPattern);
         if (!regex.test(fullText)) return null;
         return fullText.replace(regex, replace);
@@ -37,7 +38,6 @@ try {
 
         case 'write_file':
             if (!data.path || data.content === undefined) return "Error: path and content required";
-            // [Async]
             return JSON.stringify(await window.GeBrain.writeFile(data.path, data.content));
 
         case 'patch_file':
@@ -56,7 +56,6 @@ try {
                     file_head: oldContent.slice(0, 200) + "..." 
                 });
             }
-            // [Async]
             return JSON.stringify(await window.GeBrain.writeFile(data.path, newContent));
 
         case 'search_files':
@@ -76,8 +75,12 @@ try {
 
         case 'delete_file':
             if (!data.path) return "Error: path required";
-            // [Async]
             return JSON.stringify(await window.GeBrain.deleteFile(data.path));
+
+        // [新增] 改写文件名逻辑注入
+        case 'rename_file':
+            if (!data.old_path || !data.new_path) return "Error: old_path and new_path required";
+            return JSON.stringify(await window.GeBrain.renameFile(data.old_path, data.new_path));
 
         case 'get_config': 
             const rawConfig = window.GeBrain.getConfig();
